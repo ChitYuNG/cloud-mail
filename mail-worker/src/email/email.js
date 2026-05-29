@@ -178,6 +178,42 @@ export async function email(message, env, ctx) {
 			}));
 
 		}
+		// ==========================================
+		// 🚀 新增：转发到 Matrix 私人通讯中枢
+		// ==========================================
+		try {
+			// 直接利用 PostalMime 解析好的完美数据
+			const fromAddress = email.from?.address || '未知地址';
+			const fromName = email.from?.name ? `${email.from.name} ` : '';
+			const subjectStr = email.subject || '无主题';
+			
+			// 提取纯文本正文，并做长度截断（防止超长营销邮件把 Matrix 房间刷屏）
+			let bodyStr = email.text || '无纯文本内容';
+			if (bodyStr.length > 500) {
+				bodyStr = bodyStr.substring(0, 500) + '\n\n... (正文过长已截断)';
+			}
+
+			// 你的 Matrix 房间 Webhook 构造
+			// ⚠️ 记得将 !你的房间ID 替换为真实的 Internal Room ID (例如 !xxxx:samlam.xyz)
+			const matrixUrl = "https://chat.samlam.xyz/_matrix/client/v3/rooms/!sXgBKmUnmibVwGAkLV:chat.samlam.xyz/send/m.room.message";
+			const payload = {
+				msgtype: "m.text",
+				body: `📧 新邮件到达\n发件人: ${fromName}<${fromAddress}>\n主题: ${subjectStr}\n\n${bodyStr}`
+			};
+
+			// 调用 Matrix API 发送
+			await fetch(matrixUrl, {
+				method: "POST",
+				headers: {
+					"Authorization": `Bearer ${env.MATRIX_TOKEN}`, // 必须在 Cloudflare Worker 的 Variables 中添加此密钥
+					"Content-Type": "application/json"
+				},
+				body: JSON.stringify(payload)
+			});
+			
+		} catch (e) {
+			console.error('Matrix 转发模块异常: ', e);
+		}
 
 	} catch (e) {
 		console.error('邮件接收异常: ', e);
