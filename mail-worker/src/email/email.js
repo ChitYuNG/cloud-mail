@@ -225,13 +225,16 @@ export async function email(message, env, ctx) {
 			} catch (e) {
 				console.error('Matrix 转发模块异常: ', e);
 			}
-		} catch (e) {
+		} // <--- 闭合 if (matrixAllowedEmails...)
+
+	} catch (e) { // <--- 闭合函数开头的那个最外层 try，然后 catch 整体异常
 		console.error('邮件接收异常: ', e);
-		throw e
+		throw e;
 	}
 }
 
 function checkBlock(blackSubjectStr, blackContentStr, blackFromStr, email) {
+// ... 后面的代码保持不变
 
 	const blackFromList = blackFromStr ? blackFromStr.split(',') : []
 	const blackContentList = blackContentStr ? blackContentStr.split(',') : []
