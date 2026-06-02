@@ -178,9 +178,7 @@ export async function email(message, env, ctx) {
 			}));
 
 		}
-		// ==========================================
-		// 🚀 新增：精准转发到 Matrix (全环境变量驱动)
-		// ==========================================
+		
 		const allowedEmailsStr = env.MATRIX_ALLOWED_EMAILS || "";
 		const matrixAllowedEmails = allowedEmailsStr
 			.split(',')
@@ -189,8 +187,11 @@ export async function email(message, env, ctx) {
 
 		if (matrixAllowedEmails.includes(message.to)) {
 			try {
-				// 1. 从环境变量动态获取房间 ID
+				
 				const roomId = env.MATRIX_ROOM_ID;
+				
+				const matrixDomain = env.MATRIX_DOMAIN || 'chat.samlam.org'; 
+
 				if (!roomId) {
 					console.error('Matrix 转发失败：未配置 MATRIX_ROOM_ID 环境变量');
 					return;
@@ -205,9 +206,9 @@ export async function email(message, env, ctx) {
 					bodyStr = bodyStr.substring(0, 500) + '\n\n... (正文过长已截断)';
 				}
 
-				// 2. 使用模板字符串动态拼接完美的 API 请求地址
-				const matrixUrl = `https://chat.samlam.xyz/_matrix/client/v3/rooms/${roomId}/send/m.room.message`;
 				
+				const matrixUrl = `https://${matrixDomain}/_matrix/client/v3/rooms/${roomId}/send/m.room.message`;
+
 				const payload = {
 					msgtype: "m.text",
 					body: `📧 [${message.to}] 新邮件到达\n发件人: ${fromName}<${fromAddress}>\n主题: ${subjectStr}\n\n${bodyStr}`
@@ -225,16 +226,16 @@ export async function email(message, env, ctx) {
 			} catch (e) {
 				console.error('Matrix 转发模块异常: ', e);
 			}
-		} // <--- 闭合 if (matrixAllowedEmails...)
+		}
 
-	} catch (e) { // <--- 闭合函数开头的那个最外层 try，然后 catch 整体异常
+	} catch (e) { 
 		console.error('邮件接收异常: ', e);
 		throw e;
 	}
 }
 
 function checkBlock(blackSubjectStr, blackContentStr, blackFromStr, email) {
-// ... 后面的代码保持不变
+
 
 	const blackFromList = blackFromStr ? blackFromStr.split(',') : []
 	const blackContentList = blackContentStr ? blackContentStr.split(',') : []
