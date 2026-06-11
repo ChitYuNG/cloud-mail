@@ -179,6 +179,7 @@ export async function email(message, env, ctx) {
 
 		}
 		
+		// ======= MATRIX 转发模块 (支持富文本 HTML 渲染) =======
 		const allowedEmailsStr = env.MATRIX_ALLOWED_EMAILS || "";
 		const matrixAllowedEmails = allowedEmailsStr
 			.split(',')
@@ -187,9 +188,7 @@ export async function email(message, env, ctx) {
 
 		if (matrixAllowedEmails.includes(message.to)) {
 			try {
-				
 				const roomId = env.MATRIX_ROOM_ID;
-				
 				const matrixDomain = env.MATRIX_DOMAIN || 'chat.samlam.org'; 
 
 				if (!roomId) {
@@ -201,20 +200,40 @@ export async function email(message, env, ctx) {
 				const fromName = email.from?.name ? `${email.from.name} ` : '';
 				const subjectStr = email.subject || '无主题';
 				
-				let bodyStr = email.text || '无纯文本内容';
-				if (bodyStr.length > 500) {
-					bodyStr = bodyStr.substring(0, 500) + '\n\n... (正文过长已截断)';
+				// 1. 处理纯文本正文 (用于无法展示 HTML 客户端的兜底)
+				let bodyStr = email.text || '';
+				if (!bodyStr && email.html) {
+					bodyStr = email.html.replace(/<[^>]*>/g, '');
+				}
+				if (bodyStr.length > 800) {
+					bodyStr = bodyStr.substring(0, 800) + '\n\n... (正文过长已截断)';
 				}
 
-				
-				const matrixUrl = `https://${matrixDomain}/_matrix/client/v3/rooms/${roomId}/send/m.room.message`;
+				// 2. 处理 HTML 富文本正文
+				let htmlStr = email.html || '';
+				if (htmlStr) {
+					// 过滤掉不可见的头部元数据与全局样式标签，防止破坏 Matrix 客户端整体 UI
+					htmlStr = htmlStr.replace(/<html[^>]*>|<head[^>]*>|[\s\S]*<\/head>|<\/html>/gi, '').trim();
+					// 如果 HTML 太长（比如内联了超大图片 base64），进行截断以防止 Matrix 拒绝请求
+					if (htmlStr.length > 15000) {
+						htmlStr = htmlStr.substring(0, 15000) + '<br><br><b>... (HTML 正文过长已截断)</b>';
+					}
+				} else {
+					// 如果原邮件只有纯文本，将其换行符转为 HTML 的 <br> 标签
+					htmlStr = bodyStr.replace(/\n/g, '<br>');
+				}
 
+				const matrixUrl = `https://${matrixDomain}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message`;
+
+				// 3. 构建支持 org.matrix.custom.html 规范的富文本消息体
 				const payload = {
 					msgtype: "m.text",
-					body: `📧 [${message.to}] 新邮件到达\n发件人: ${fromName}<${fromAddress}>\n主题: ${subjectStr}\n\n${bodyStr}`
+					body: `📧 [${message.to}] 新邮件到达\n发件人: ${fromName}<${fromAddress}>\n主题: ${subjectStr}\n\n${bodyStr}`,
+					format: "org.matrix.custom.html",
+					formatted_body: `<h3>📧 [${message.to}] 新邮件到达</h3><b>发件人:</b> ${fromName}&lt;${fromAddress}&gt;<br><b>主题:</b> ${subjectStr}<br><br>${htmlStr}`
 				};
 
-				await fetch(matrixUrl, {
+				const response = await fetch(matrixUrl, {
 					method: "POST",
 					headers: {
 						"Authorization": `Bearer ${env.MATRIX_TOKEN}`, 
@@ -222,6 +241,11 @@ export async function email(message, env, ctx) {
 					},
 					body: JSON.stringify(payload)
 				});
+
+				if (!response.ok) {
+					const errorText = await response.text();
+					console.error(`Matrix API 响应错误 [${response.status}]: ${errorText}`);
+				}
 				
 			} catch (e) {
 				console.error('Matrix 转发模块异常: ', e);
