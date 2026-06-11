@@ -179,7 +179,7 @@ export async function email(message, env, ctx) {
 
 		}
 		
-		// ======= MATRIX 转发模块 (支持富文本 HTML 渲染) =======
+		// ======= MATRIX 转发模块 (全面支持富文本及图片渲染) =======
 		const allowedEmailsStr = env.MATRIX_ALLOWED_EMAILS || "";
 		const matrixAllowedEmails = allowedEmailsStr
 			.split(',')
@@ -200,7 +200,7 @@ export async function email(message, env, ctx) {
 				const fromName = email.from?.name ? `${email.from.name} ` : '';
 				const subjectStr = email.subject || '无主题';
 				
-				// 1. 处理纯文本正文 (用于无法展示 HTML 客户端的兜底)
+				// 1. 生成纯文本兜底
 				let bodyStr = email.text || '';
 				if (!bodyStr && email.html) {
 					bodyStr = email.html.replace(/<[^>]*>/g, '');
@@ -209,23 +209,43 @@ export async function email(message, env, ctx) {
 					bodyStr = bodyStr.substring(0, 800) + '\n\n... (正文过长已截断)';
 				}
 
-				// 2. 处理 HTML 富文本正文
+				// 2. 深度处理 HTML 中的图片
 				let htmlStr = email.html || '';
 				if (htmlStr) {
-					// 过滤掉不可见的头部元数据与全局样式标签，防止破坏 Matrix 客户端整体 UI
+					// 核心优化 A：将带有 cid: 标记的内嵌图片附件，替换为 R2 桶里的公开外链 URL
+					if (attachments.length > 0 && r2Domain) {
+						const protocol = r2Domain.startsWith('http') ? '' : 'https://';
+						const baseUrl = `${protocol}${r2Domain}`;
+						
+						attachments.forEach(att => {
+							if (att.contentId) {
+								// 清洗 cid 字符串（有时带尖括号 <image_cid>）
+								const cleanCid = att.contentId.replace(/[<>]/g, '');
+								const r2Url = `${baseUrl}/${att.key}`;
+								
+								// 替换各种可能在 HTML 出现的引用格式
+								htmlStr = htmlStr.split(`cid:${cleanCid}`).join(r2Url);
+								htmlStr = htmlStr.split(`cid:<${cleanCid}>`).join(r2Url);
+							}
+						});
+					}
+
+					// 核心优化 B：移除巨大的 Base64 编码图片（防止卡死请求），替换为占位文本提示
+					htmlStr = htmlStr.replace(/src=["']data:image\/[^;]+;base64,[^"']+["']/gi, 'src="" alt="[超大内联图片已自动过滤]"');
+
+					// 过滤不必要的全局元数据标签
 					htmlStr = htmlStr.replace(/<html[^>]*>|<head[^>]*>|[\s\S]*<\/head>|<\/html>/gi, '').trim();
-					// 如果 HTML 太长（比如内联了超大图片 base64），进行截断以防止 Matrix 拒绝请求
-					if (htmlStr.length > 15000) {
-						htmlStr = htmlStr.substring(0, 15000) + '<br><br><b>... (HTML 正文过长已截断)</b>';
+					
+					// 适当调高长度限制到 40000 字符，确保带有很多图片外链链接的 HTML 能够完整发送
+					if (htmlStr.length > 40000) {
+						htmlStr = htmlStr.substring(0, 40000) + '<br><br><b>... (HTML 正文过长已截断)</b>';
 					}
 				} else {
-					// 如果原邮件只有纯文本，将其换行符转为 HTML 的 <br> 标签
 					htmlStr = bodyStr.replace(/\n/g, '<br>');
 				}
 
 				const matrixUrl = `https://${matrixDomain}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message`;
 
-				// 3. 构建支持 org.matrix.custom.html 规范的富文本消息体
 				const payload = {
 					msgtype: "m.text",
 					body: `📧 [${message.to}] 新邮件到达\n发件人: ${fromName}<${fromAddress}>\n主题: ${subjectStr}\n\n${bodyStr}`,
