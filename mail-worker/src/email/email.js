@@ -13,7 +13,9 @@ import telegramService from '../service/telegram-service';
 import aiService from '../service/ai-service';
 
 export async function email(message, env, ctx) {
+
 	try {
+
 		const {
 			receive,
 			tgChatId,
@@ -38,6 +40,7 @@ export async function email(message, env, ctx) {
 
 		const reader = message.raw.getReader();
 		let content = '';
+
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
@@ -45,37 +48,47 @@ export async function email(message, env, ctx) {
 		}
 
 		const email = await PostalMime.parse(content);
+
+
 		const blockFlag = checkBlock(blackSubject, blackContent, blackFrom, email);
+
 		if (blockFlag) {
 			message.setReject('Message rejected');
 			return;
 		}
 
 		const account = await accountService.selectByEmailIncludeDel({ env: env }, message.to);
+
 		if (!account && noRecipient === settingConst.noRecipient.CLOSE) {
 			message.setReject('Recipient not found');
 			return;
 		}
 
-		let userRow = {};
+		let userRow = {}
+
 		if (account) {
-			userRow = await userService.selectByIdIncludeDel({ env: env }, account.userId);
+			 userRow = await userService.selectByIdIncludeDel({ env: env }, account.userId);
 		}
 
 		if (account && userRow.email !== env.admin) {
+
 			let { banEmail, availDomain } = await roleService.selectByUserId({ env: env }, account.userId);
+
 			if (!roleService.hasAvailDomainPerm(availDomain, message.to)) {
 				message.setReject('The recipient is not authorized to use this domain.');
 				return;
 			}
-			if (roleService.isBanEmail(banEmail, email.from.address)) {
+
+			if(roleService.isBanEmail(banEmail, email.from.address)) {
 				message.setReject('The recipient is disabled from receiving emails.');
 				return;
 			}
+
 		}
 
+
 		if (!email.to) {
-			email.to = [{ address: message.to, name: emailUtils.getName(message.to) }];
+			email.to = [{ address: message.to, name: emailUtils.getName(message.to)}]
 		}
 
 		const toName = email.to.find(item => item.address === message.to)?.name || '';
@@ -104,6 +117,7 @@ export async function email(message, env, ctx) {
 
 		const attachments = [];
 		const cidAttachments = [];
+
 		for (let item of email.attachments) {
 			let attachment = { ...item };
 			attachment.key = constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(attachment.content) + fileUtils.getExtFileName(item.filename);
@@ -115,6 +129,7 @@ export async function email(message, env, ctx) {
 		}
 
 		let emailRow = await emailService.receive({ env }, params, cidAttachments, r2Domain);
+
 		attachments.forEach(attachment => {
 			attachment.emailId = emailRow.emailId;
 			attachment.userId = emailRow.userId;
@@ -131,29 +146,40 @@ export async function email(message, env, ctx) {
 
 		emailRow = await emailService.completeReceive({ env }, account ? emailConst.status.RECEIVE : emailConst.status.NOONE, emailRow.emailId);
 
+
 		if (ruleType === settingConst.ruleType.RULE) {
+
 			const emails = ruleEmail.split(',');
+
 			if (!emails.includes(message.to)) {
 				return;
 			}
+
 		}
 
+		//转发到TG
 		if (tgBotStatus === settingConst.tgBotStatus.OPEN && tgChatId) {
-			await telegramService.sendEmailToBot({ env }, emailRow);
+			await telegramService.sendEmailToBot({ env }, emailRow)
 		}
 
+		//转发到其他邮箱
 		if (forwardStatus === settingConst.forwardStatus.OPEN && forwardEmail) {
+
 			const emails = forwardEmail.split(',');
+
 			await Promise.all(emails.map(async email => {
+
 				try {
 					await message.forward(email);
 				} catch (e) {
 					console.error(`转发邮箱 ${email} 失败：`, e);
 				}
+
 			}));
+
 		}
 		
-		// ======= MATRIX 转发模块 (支持 mxc:// 图片直连渲染) =======
+		// ======= MATRIX 转发模块 (支持富文本 HTML 渲染) =======
 		const allowedEmailsStr = env.MATRIX_ALLOWED_EMAILS || "";
 		const matrixAllowedEmails = allowedEmailsStr
 			.split(',')
@@ -174,62 +200,32 @@ export async function email(message, env, ctx) {
 				const fromName = email.from?.name ? `${email.from.name} ` : '';
 				const subjectStr = email.subject || '无主题';
 				
+				// 1. 处理纯文本正文 (用于无法展示 HTML 客户端的兜底)
 				let bodyStr = email.text || '';
 				if (!bodyStr && email.html) {
-					bodyStr = email.html.substring(0, 1000).replace(/<[^>]*>/g, '');
+					bodyStr = email.html.replace(/<[^>]*>/g, '');
 				}
-				if (bodyStr.length > 500) {
-					bodyStr = bodyStr.substring(0, 500) + '\n\n... (正文过长已截断)';
+				if (bodyStr.length > 800) {
+					bodyStr = bodyStr.substring(0, 800) + '\n\n... (正文过长已截断)';
 				}
 
+				// 2. 处理 HTML 富文本正文
 				let htmlStr = email.html || '';
 				if (htmlStr) {
-					// 限制长度保障 CPU 安全
-					if (htmlStr.length > 25000) {
-						htmlStr = htmlStr.substring(0, 25000) + '<br><br><b>... [邮件体积过大，HTML 已自动截断安全保护]</b>';
-					}
-
-					// 核心进化：把图片附件上传至 Matrix 媒体库并转化为符合规范的 mxc:// 链接
-					if (attachments.length > 0) {
-						for (const att of attachments) {
-							// 筛选出属于正文内嵌的图片附件
-							if (att.contentId && att.contentType && att.contentType.startsWith('image/')) {
-								try {
-									const cleanCid = att.contentId.replace(/[<>]/g, '');
-									
-									// 构造 Matrix 媒体上传 API
-									const uploadUrl = `https://${matrixDomain}/_matrix/media/v3/upload?filename=${encodeURIComponent(att.filename || 'image.png')}`;
-									
-									const uploadRes = await fetch(uploadUrl, {
-										method: 'POST',
-										headers: {
-											'Authorization': `Bearer ${env.MATRIX_TOKEN}`,
-											'Content-Type': att.contentType
-										},
-										body: att.content // 传入图片的原始二进制 ArrayBuffer/Buffer
-									});
-
-									if (uploadRes.ok) {
-										const uploadData = await uploadRes.json();
-										const mxcUrl = uploadData.content_uri; // 拿到合规的 mxc:// 链接
-										
-										// 将 HTML 里的 cid 引用替换为合规的 mxc 地址
-										htmlStr = htmlStr.split(`cid:${cleanCid}`).join(mxcUrl);
-									} else {
-										console.error(`图片 ${att.filename} 上传 Matrix 媒体库失败: ${uploadRes.status}`);
-									}
-								} catch (uploadErr) {
-									console.error('上传图片至 Matrix 异常:', uploadErr);
-								}
-							}
-						}
-					}
+					// 过滤掉不可见的头部元数据与全局样式标签，防止破坏 Matrix 客户端整体 UI
 					htmlStr = htmlStr.replace(/<html[^>]*>|<head[^>]*>|[\s\S]*<\/head>|<\/html>/gi, '').trim();
+					// 如果 HTML 太长（比如内联了超大图片 base64），进行截断以防止 Matrix 拒绝请求
+					if (htmlStr.length > 15000) {
+						htmlStr = htmlStr.substring(0, 15000) + '<br><br><b>... (HTML 正文过长已截断)</b>';
+					}
 				} else {
+					// 如果原邮件只有纯文本，将其换行符转为 HTML 的 <br> 标签
 					htmlStr = bodyStr.replace(/\n/g, '<br>');
 				}
 
 				const matrixUrl = `https://${matrixDomain}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message`;
+
+				// 3. 构建支持 org.matrix.custom.html 规范的富文本消息体
 				const payload = {
 					msgtype: "m.text",
 					body: `📧 [${message.to}] 新邮件到达\n发件人: ${fromName}<${fromAddress}>\n主题: ${subjectStr}\n\n${bodyStr}`,
@@ -250,6 +246,7 @@ export async function email(message, env, ctx) {
 					const errorText = await response.text();
 					console.error(`Matrix API 响应错误 [${response.status}]: ${errorText}`);
 				}
+				
 			} catch (e) {
 				console.error('Matrix 转发模块异常: ', e);
 			}
@@ -262,26 +259,30 @@ export async function email(message, env, ctx) {
 }
 
 function checkBlock(blackSubjectStr, blackContentStr, blackFromStr, email) {
-	const blackFromList = blackFromStr ? blackFromStr.split(',') : [];
-	const blackContentList = blackContentStr ? blackContentStr.split(',') : [];
-	const blackSubjectList = blackSubjectStr ? blackSubjectStr.split(',') : [];
+
+
+	const blackFromList = blackFromStr ? blackFromStr.split(',') : []
+	const blackContentList = blackContentStr ? blackContentStr.split(',') : []
+	const blackSubjectList = blackSubjectStr ? blackSubjectStr.split(',') : []
 
 	for (const blackSubject of blackSubjectList) {
 		if (email.subject?.includes(blackSubject)) {
-			return true;
+			return true
 		}
 	}
 
 	for (const blackContent of blackContentList) {
 		if (email.html?.includes(blackContent) || email.text?.includes(blackContent)) {
-			return true;
+			return true
 		}
 	}
 
 	for (const blackFrom of blackFromList) {
 		if (email.from.address === blackFrom || emailUtils.getDomain(email.from.address) === blackFrom) {
-			return true;
+			return true
 		}
 	}
-	return false;
+
+	return false
+
 }
