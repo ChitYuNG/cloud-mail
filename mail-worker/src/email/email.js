@@ -153,7 +153,7 @@ export async function email(message, env, ctx) {
 			}));
 		}
 		
-		// ======= MATRIX 转发模块 =======
+		// ======= MATRIX 转发模块 (支持 mxc:// 图片直连渲染) =======
 		const allowedEmailsStr = env.MATRIX_ALLOWED_EMAILS || "";
 		const matrixAllowedEmails = allowedEmailsStr
 			.split(',')
@@ -184,20 +184,45 @@ export async function email(message, env, ctx) {
 
 				let htmlStr = email.html || '';
 				if (htmlStr) {
+					// 限制长度保障 CPU 安全
 					if (htmlStr.length > 25000) {
 						htmlStr = htmlStr.substring(0, 25000) + '<br><br><b>... [邮件体积过大，HTML 已自动截断安全保护]</b>';
 					}
 
-					if (attachments.length > 0 && r2Domain) {
-						const protocol = r2Domain.startsWith('http') ? '' : 'https://';
-						const baseUrl = `${protocol}${r2Domain}`;
-						attachments.forEach(att => {
-							if (att.contentId) {
-								const cleanCid = att.contentId.replace(/[<>]/g, '');
-								const r2Url = `${baseUrl}/${att.key}`;
-								htmlStr = htmlStr.split(`cid:${cleanCid}`).join(r2Url);
+					// 核心进化：把图片附件上传至 Matrix 媒体库并转化为符合规范的 mxc:// 链接
+					if (attachments.length > 0) {
+						for (const att of attachments) {
+							// 筛选出属于正文内嵌的图片附件
+							if (att.contentId && att.contentType && att.contentType.startsWith('image/')) {
+								try {
+									const cleanCid = att.contentId.replace(/[<>]/g, '');
+									
+									// 构造 Matrix 媒体上传 API
+									const uploadUrl = `https://${matrixDomain}/_matrix/media/v3/upload?filename=${encodeURIComponent(att.filename || 'image.png')}`;
+									
+									const uploadRes = await fetch(uploadUrl, {
+										method: 'POST',
+										headers: {
+											'Authorization': `Bearer ${env.MATRIX_TOKEN}`,
+											'Content-Type': att.contentType
+										},
+										body: att.content // 传入图片的原始二进制 ArrayBuffer/Buffer
+									});
+
+									if (uploadRes.ok) {
+										const uploadData = await uploadRes.json();
+										const mxcUrl = uploadData.content_uri; // 拿到合规的 mxc:// 链接
+										
+										// 将 HTML 里的 cid 引用替换为合规的 mxc 地址
+										htmlStr = htmlStr.split(`cid:${cleanCid}`).join(mxcUrl);
+									} else {
+										console.error(`图片 ${att.filename} 上传 Matrix 媒体库失败: ${uploadRes.status}`);
+									}
+								} catch (uploadErr) {
+									console.error('上传图片至 Matrix 异常:', uploadErr);
+								}
 							}
-						});
+						}
 					}
 					htmlStr = htmlStr.replace(/<html[^>]*>|<head[^>]*>|[\s\S]*<\/head>|<\/html>/gi, '').trim();
 				} else {
