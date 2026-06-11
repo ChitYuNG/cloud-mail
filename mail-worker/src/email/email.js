@@ -179,7 +179,7 @@ export async function email(message, env, ctx) {
 
 		}
 		
-		// ======= MATRIX 转发模块 (全面支持富文本及图片渲染) =======
+		// ======= MATRIX 转发模块 (高性能、轻量化、防 CPU 熔断版本) =======
 		const allowedEmailsStr = env.MATRIX_ALLOWED_EMAILS || "";
 		const matrixAllowedEmails = allowedEmailsStr
 			.split(',')
@@ -200,46 +200,42 @@ export async function email(message, env, ctx) {
 				const fromName = email.from?.name ? `${email.from.name} ` : '';
 				const subjectStr = email.subject || '无主题';
 				
-				// 1. 生成纯文本兜底
+				// 1. 纯文本生成（拒绝大正则）
 				let bodyStr = email.text || '';
 				if (!bodyStr && email.html) {
-					bodyStr = email.html.replace(/<[^>]*>/g, '');
+					// 仅作长度切片，杜绝大文本下的正则清洗
+					bodyStr = email.html.substring(0, 1000).replace(/<[^>]*>/g, '');
 				}
-				if (bodyStr.length > 800) {
-					bodyStr = bodyStr.substring(0, 800) + '\n\n... (正文过长已截断)';
+				if (bodyStr.length > 500) {
+					bodyStr = bodyStr.substring(0, 500) + '\n\n... (正文过长已截断)';
 				}
 
-				// 2. 深度处理 HTML 中的图片
+				// 2. 超低能耗 HTML 处理
 				let htmlStr = email.html || '';
 				if (htmlStr) {
-					// 核心优化 A：将带有 cid: 标记的内嵌图片附件，替换为 R2 桶里的公开外链 URL
+					// 【CPU 优化核心 1】如果 HTML 字符串里包含巨大的 base64 图片数据，
+					// 绝对不要用正则去匹配它。直接通过严格的硬截断限制大小，瞬间释放 CPU 压力。
+					if (htmlStr.length > 25000) {
+						htmlStr = htmlStr.substring(0, 25000) + '<br><br><b>... [邮件体积过大，HTML 已自动截断安全保护]</b>';
+					}
+
+					// 【CPU 优化核心 2】只有在截断后的安全长度内，才执行轻量级替换
 					if (attachments.length > 0 && r2Domain) {
 						const protocol = r2Domain.startsWith('http') ? '' : 'https://';
 						const baseUrl = `${protocol}${r2Domain}`;
 						
 						attachments.forEach(att => {
 							if (att.contentId) {
-								// 清洗 cid 字符串（有时带尖括号 <image_cid>）
 								const cleanCid = att.contentId.replace(/[<>]/g, '');
 								const r2Url = `${baseUrl}/${att.key}`;
-								
-								// 替换各种可能在 HTML 出现的引用格式
+								// 使用原生内建的高效 split 方案，放弃正则
 								htmlStr = htmlStr.split(`cid:${cleanCid}`).join(r2Url);
-								htmlStr = htmlStr.split(`cid:<${cleanCid}>`).join(r2Url);
 							}
 						});
 					}
 
-					// 核心优化 B：移除巨大的 Base64 编码图片（防止卡死请求），替换为占位文本提示
-					htmlStr = htmlStr.replace(/src=["']data:image\/[^;]+;base64,[^"']+["']/gi, 'src="" alt="[超大内联图片已自动过滤]"');
-
-					// 过滤不必要的全局元数据标签
+					// 清理不必要的包装
 					htmlStr = htmlStr.replace(/<html[^>]*>|<head[^>]*>|[\s\S]*<\/head>|<\/html>/gi, '').trim();
-					
-					// 适当调高长度限制到 40000 字符，确保带有很多图片外链链接的 HTML 能够完整发送
-					if (htmlStr.length > 40000) {
-						htmlStr = htmlStr.substring(0, 40000) + '<br><br><b>... (HTML 正文过长已截断)</b>';
-					}
 				} else {
 					htmlStr = bodyStr.replace(/\n/g, '<br>');
 				}
@@ -253,56 +249,4 @@ export async function email(message, env, ctx) {
 					formatted_body: `<h3>📧 [${message.to}] 新邮件到达</h3><b>发件人:</b> ${fromName}&lt;${fromAddress}&gt;<br><b>主题:</b> ${subjectStr}<br><br>${htmlStr}`
 				};
 
-				const response = await fetch(matrixUrl, {
-					method: "POST",
-					headers: {
-						"Authorization": `Bearer ${env.MATRIX_TOKEN}`, 
-						"Content-Type": "application/json"
-					},
-					body: JSON.stringify(payload)
-				});
-
-				if (!response.ok) {
-					const errorText = await response.text();
-					console.error(`Matrix API 响应错误 [${response.status}]: ${errorText}`);
-				}
-				
-			} catch (e) {
-				console.error('Matrix 转发模块异常: ', e);
-			}
-		}
-
-	} catch (e) { 
-		console.error('邮件接收异常: ', e);
-		throw e;
-	}
-}
-
-function checkBlock(blackSubjectStr, blackContentStr, blackFromStr, email) {
-
-
-	const blackFromList = blackFromStr ? blackFromStr.split(',') : []
-	const blackContentList = blackContentStr ? blackContentStr.split(',') : []
-	const blackSubjectList = blackSubjectStr ? blackSubjectStr.split(',') : []
-
-	for (const blackSubject of blackSubjectList) {
-		if (email.subject?.includes(blackSubject)) {
-			return true
-		}
-	}
-
-	for (const blackContent of blackContentList) {
-		if (email.html?.includes(blackContent) || email.text?.includes(blackContent)) {
-			return true
-		}
-	}
-
-	for (const blackFrom of blackFromList) {
-		if (email.from.address === blackFrom || emailUtils.getDomain(email.from.address) === blackFrom) {
-			return true
-		}
-	}
-
-	return false
-
-}
+				const response = await fetch(matrix
